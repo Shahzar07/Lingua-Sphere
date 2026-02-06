@@ -1,0 +1,7 @@
+{
+  "name": "LinguaSphere",
+  "description": "A multimodal LMS platform where users learn languages through real-time AI voice conversation and academic subjects powered by Gemini Multimodal Live API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
