@@ -3,6 +3,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { UserProfile, DayPlan } from '../types';
 import { geminiService } from '../services/geminiService';
 import { createBlob, decodeAudioData, decode, safeCloseAudioContext } from '../services/audioUtils';
+import { Icons } from '../constants';
 
 interface OnboardingProps {
   onComplete: (profile: UserProfile, preGeneratedPlan: DayPlan[]) => void;
@@ -13,6 +14,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
   const [hasStarted, setHasStarted] = useState(false);
   const [isReadyToTransition, setIsReadyToTransition] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<'idle' | 'listening' | 'speaking' | 'processing'>('idle');
   const [profile, setProfile] = useState<UserProfile>({
     name: '',
     nativeLanguage: '',
@@ -35,7 +37,6 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   
-  // Ref to track mounting state to avoid async race conditions
   const isMountedRef = useRef(true);
   
   useEffect(() => {
@@ -57,7 +58,6 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
     });
     sourcesRef.current.clear();
     
-    // Cleanup audio context first
     const aCtx = audioContextRef.current;
     const oCtx = outputContextRef.current;
     audioContextRef.current = null;
@@ -66,7 +66,6 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
     await safeCloseAudioContext(aCtx);
     await safeCloseAudioContext(oCtx);
     
-    // Then cleanup session
     if (sessionPromiseRef.current) {
       try {
         const session = await sessionPromiseRef.current;
@@ -79,13 +78,12 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
   const startJourney = async () => {
     try {
       setError(null);
+      await stopSession(); // Ensure clean slate
       
-      // Reset state
       sessionActive.current = false;
       
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // Safety check if unmounted while waiting for stream
       if (!isMountedRef.current) {
         stream.getTracks().forEach(track => track.stop());
         return;
@@ -94,6 +92,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
       audioContextRef.current = new AudioContext({ sampleRate: 16000 });
       outputContextRef.current = new AudioContext({ sampleRate: 24000 });
       setHasStarted(true);
+      setConnectionStatus('listening');
 
       const callbacks = {
         onopen: () => {
@@ -105,21 +104,42 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
         onmessage: async (message: any) => {
           if (!sessionActive.current || !isMountedRef.current) return;
 
+          // Handle Interruption
+          if (message.serverContent?.interrupted) {
+            console.log("Interruption detected - clearing queue");
+            sourcesRef.current.forEach(source => {
+              try { source.stop(); } catch(e) {}
+            });
+            sourcesRef.current.clear();
+            nextStartTimeRef.current = 0;
+            setConnectionStatus('listening');
+          }
+
+          // Handle Audio Output
           const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
           if (audioData && outputContextRef.current && outputContextRef.current.state === 'running') {
+             setConnectionStatus('speaking');
              try {
                const audioBuffer = await decodeAudioData(decode(audioData), outputContextRef.current, 24000, 1);
                const source = outputContextRef.current.createBufferSource();
                source.buffer = audioBuffer;
                source.connect(outputContextRef.current.destination);
+               
+               // Robust timing logic
                const now = outputContextRef.current.currentTime;
-               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, now + 0.1);
+               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, now + 0.05); // Small buffer
                source.start(nextStartTimeRef.current);
                nextStartTimeRef.current += audioBuffer.duration;
+               
                sourcesRef.current.add(source);
-               source.onended = () => sourcesRef.current.delete(source);
+               source.onended = () => {
+                 sourcesRef.current.delete(source);
+                 if (sourcesRef.current.size === 0 && isMountedRef.current) {
+                   setConnectionStatus('listening');
+                 }
+               };
              } catch (err) {
-               console.warn("Oral feedback playback interrupted", err);
+               console.warn("Audio playback warning", err);
              }
           }
 
@@ -130,27 +150,31 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
             setTranscript(message.serverContent.inputTranscription.text);
           }
 
+          // Handle Tool Calls (The Brain)
           if (message.toolCall) {
+             setConnectionStatus('processing');
              const functionCalls = message.toolCall.functionCalls;
              const responses = [];
+             
              for (const call of functionCalls) {
+               console.log("Tool Call Received:", call.name, call.args);
+               
                if (call.name === 'updateUserProfile') {
                  setProfile(prev => ({ ...prev, ...call.args }));
-                 responses.push({ id: call.id, name: call.name, response: { result: 'Acknowledged.' } });
+                 responses.push({ id: call.id, name: call.name, response: { result: 'Profile updated successfully.' } });
                }
                if (call.name === 'finishOnboarding') {
                   setIsReadyToTransition(true);
-                  responses.push({ id: call.id, name: call.name, response: { result: 'Dossier finalized.' } });
+                  responses.push({ id: call.id, name: call.name, response: { result: 'Onboarding finalized.' } });
                }
              }
+             
+             // IMMEDIATE RESPONSE to prevent hanging
              if (sessionActive.current && sessionPromiseRef.current) {
                 sessionPromiseRef.current.then(session => {
-                  try {
-                    if (sessionActive.current) {
+                  if (sessionActive.current) {
                       session.sendToolResponse({ functionResponses: responses });
-                    }
-                  } catch (err) {
-                    console.error("Dossier update error:", err);
+                      // Status will revert to speaking/listening naturally via next message
                   }
                 });
              }
@@ -160,7 +184,8 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
           console.error("Neural link error:", e);
           sessionActive.current = false;
           if (isMountedRef.current) {
-            setError("The admissions link experienced a network instability. Please reconnect.");
+            setError("Connection disrupted. Please reconnect.");
+            setConnectionStatus('idle');
           }
         },
         onclose: () => {
@@ -174,8 +199,8 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
       
       const source = audioContextRef.current.createMediaStreamSource(stream);
       const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+      
       processor.onaudioprocess = (e) => {
-        // Only send if active, session promise exists, and audio context is healthy
         if (!sessionActive.current || !sessionPromiseRef.current || !audioContextRef.current || audioContextRef.current.state !== 'running') return;
         
         const inputData = e.inputBuffer.getChannelData(0);
@@ -187,28 +212,22 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
               session.sendRealtimeInput({ media: pcmBlob });
             }
           } catch(err) {
-            // Log once and set inactive to avoid flooding console with "Network error"
-            console.warn("Input link dropped:", err);
-            sessionActive.current = false;
+             // Silent fail for stream drops
           }
-        }).catch(() => {
-           sessionActive.current = false;
         });
       };
+      
       source.connect(processor);
       processor.connect(audioContextRef.current.destination);
       
-      // Ensure context is running (required by some browsers even after click)
-      if (audioContextRef.current.state === 'suspended') {
-        await audioContextRef.current.resume();
-      }
-      if (outputContextRef.current.state === 'suspended') {
-        await outputContextRef.current.resume();
-      }
+      // Force resume contexts to handle browser autoplay policies
+      if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
+      if (outputContextRef.current.state === 'suspended') await outputContextRef.current.resume();
 
     } catch (e) {
+      console.error(e);
       if (isMountedRef.current) {
-        setError("High-fidelity audio access denied. Protocol cannot proceed.");
+        setError("Microphone access is required for the interview.");
       }
     }
   };
@@ -223,7 +242,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
       }
     } catch (e) {
       if (isMountedRef.current) {
-        setError("Failed to architect mastery path. Please refresh the link.");
+        setError("Failed to generate your academy plan. Please try again.");
         setIsGenerating(false);
       }
     }
@@ -277,9 +296,25 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
           </div>
         )}
 
-        <div className={`fixed bottom-8 md:bottom-32 left-0 right-0 flex justify-center px-4 md:px-12 transition-all duration-1000 z-50 ${aiTranscript ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-12'}`}>
-          <div className="glass px-8 py-8 md:px-24 md:py-20 rounded-3xl md:rounded-[5rem] border border-slate-100 shadow-5xl text-center max-w-7xl ring-1 ring-slate-900/5 w-full md:w-auto">
-             <p className="text-slate-900 font-serif text-2xl md:text-6xl italic leading-tight tracking-tight">"{aiTranscript}"</p>
+        <div className="fixed bottom-8 md:bottom-24 left-0 right-0 flex flex-col items-center z-50 pointer-events-none">
+          {/* Status Indicator */}
+          <div className="mb-6 flex items-center gap-2 bg-slate-900/5 backdrop-blur-md px-4 py-2 rounded-full border border-white/10">
+              <div className={`w-2 h-2 rounded-full ${
+                  connectionStatus === 'speaking' ? 'bg-emerald-400 animate-pulse' :
+                  connectionStatus === 'processing' ? 'bg-amber-400 animate-bounce' :
+                  'bg-red-500 animate-pulse'
+              }`} />
+              <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                  {connectionStatus === 'speaking' ? 'Dean is Speaking' :
+                   connectionStatus === 'processing' ? 'Processing Response' :
+                   'Listening for Student...'}
+              </span>
+          </div>
+
+          <div className={`transition-all duration-1000 transform ${aiTranscript ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-12'}`}>
+            <div className="glass px-8 py-8 md:px-24 md:py-20 rounded-3xl md:rounded-[5rem] border border-slate-100 shadow-5xl text-center max-w-7xl ring-1 ring-slate-900/5 w-full md:w-auto mx-4">
+               <p className="text-slate-900 font-serif text-2xl md:text-5xl italic leading-tight tracking-tight">"{aiTranscript}"</p>
+            </div>
           </div>
         </div>
 
@@ -293,22 +328,22 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, isLoading })
             <div key={i} className="space-y-4 md:space-y-6 group">
               <label className="text-[10px] md:text-[14px] font-black uppercase tracking-[0.5em] md:tracking-[0.7em] text-academic-red/40 block group-hover:text-academic-red transition-colors">{field.label}</label>
               <div className={`text-4xl md:text-7xl font-serif border-b-4 border-slate-50 pb-4 md:pb-8 min-h-[5rem] md:min-h-[7rem] flex items-center transition-all group-hover:border-academic-red/10 ${field.color} break-words`}>
-                {field.value || <span className="text-slate-100 italic font-light">Listening...</span>}
+                {field.value || <span className="text-slate-100 italic font-light text-3xl">...</span>}
               </div>
             </div>
           ))}
         </div>
         
         <div className="text-center mt-12 md:mt-20">
-           <p className="text-slate-300 text-xl md:text-3xl font-light tracking-tight italic">
-             {transcript ? `"${transcript}"` : 'Awaiting scholar registration data...'}
+           <p className="text-slate-300 text-xl md:text-3xl font-light tracking-tight italic min-h-[3rem]">
+             {transcript ? `"${transcript}"` : ''}
            </p>
         </div>
 
-        <div className={`flex flex-col items-center gap-8 md:gap-16 transition-all duration-1000 ${isReadyToTransition ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-24 pointer-events-none'}`}>
+        <div className={`flex flex-col items-center gap-8 md:gap-16 transition-all duration-1000 pb-32 md:pb-0 ${isReadyToTransition ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-24 pointer-events-none'}`}>
           <button 
             onClick={handleComplete} 
-            className="w-full md:w-auto px-12 md:px-40 py-8 md:py-12 bg-slate-900 text-white rounded-2xl md:rounded-full font-black uppercase tracking-[0.6em] md:tracking-[0.9em] text-[10px] md:text-xs shadow-5xl animate-subtle hover:bg-academic-red transition-all transform hover:scale-105"
+            className="w-full md:w-auto px-12 md:px-40 py-8 md:py-12 bg-slate-900 text-white rounded-2xl md:rounded-full font-black uppercase tracking-[0.6em] md:tracking-[0.9em] text-[10px] md:text-xs shadow-5xl animate-subtle hover:bg-academic-red transition-all transform hover:scale-105 pointer-events-auto"
           >
             Authenticate Admission Path →
           </button>
