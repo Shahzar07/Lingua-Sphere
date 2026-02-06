@@ -1,5 +1,5 @@
 
-import { GoogleGenAI, Type, Modality, FunctionDeclaration } from "@google/genai";
+import { GoogleGenAI, Type, Modality, FunctionDeclaration, SchemaType } from "@google/genai";
 import { Quiz, SessionConfig, DayPlan, UserProfile, Curriculum } from "../types";
 import { getSystemInstruction } from "../constants";
 
@@ -13,7 +13,7 @@ const safeGetText = (response: any): string => {
 
 const updateUserProfileTool: FunctionDeclaration = {
   name: 'updateUserProfile',
-  description: 'Update student profile data. Call this IMMEDIATELY when the user provides any information (Name, Language, Accent, Goal).',
+  description: 'Update student profile data. Call this IMMEDIATELY when the user provides any information.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -30,7 +30,7 @@ const updateUserProfileTool: FunctionDeclaration = {
 
 const finishOnboardingTool: FunctionDeclaration = {
   name: 'finishOnboarding',
-  description: 'Call this ONLY when you have captured Name, Target Language, Accent, and Goal, AND you have confirmed the summary with the user.',
+  description: 'Call this ONLY after you have verbally summarized the profile to the user and they have confirmed it is correct.',
   parameters: { type: Type.OBJECT, properties: {} },
 };
 
@@ -91,10 +91,16 @@ export const geminiService = {
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `Architect a 15-day Linguistic Mastery Path for student ${profile.name}. 
-        Goal: ${profile.professionalGoal} in ${profile.targetLanguage} with ${profile.accentPreference} accent.
+        contents: `Architect a highly specific 15-day Linguistic Mastery Path for a student named ${profile.name}. 
+        
+        CRITICAL CONSTRAINTS:
+        - Target Language: ${profile.targetLanguage}
+        - Desired Accent: ${profile.accentPreference} (Plan MUST strictly focus on acquiring this specific accent)
+        - Professional Goal: ${profile.professionalGoal} (Content must be relevant to this goal)
+        - Native Language: ${profile.nativeLanguage} (Address likely phonetic difficulties)
+        
         Each Day MUST have three rigorous sub-phases: Instruction (Fundamentals), Practice (Grip), and Evaluation (Interview).
-        Each phase description must be academic and objective-driven. Output JSON.`,
+        Each phase description must be academic, objective-driven, and reference specific phonemes or cultural nuances. Output JSON.`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -145,7 +151,7 @@ export const geminiService = {
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `Create a 10-question MCQ Mastery Assessment for: ${dayPlan.topic} in ${targetLang}. Focus on accent details and grammatical nuances.`,
+        contents: `Create a 5-question MCQ Mastery Assessment for: ${dayPlan.topic} in ${targetLang}. Focus on accent details and grammatical nuances.`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -227,23 +233,27 @@ export const geminiService = {
         },
         tools: [{ functionDeclarations: [updateUserProfileTool, finishOnboardingTool] }],
         systemInstruction: `You are the Dean of LinguaSphere Academy.
-        MISSION: Efficiently onboard a new student by gathering their details naturally.
+        MISSION: Onboard a new student for a 15-day residency.
         
         PROTOCOL:
-        1. GREETING: Welcome the student professionally.
-        2. GATHER INFO: Ask for Name, Target Language, Accent Preference (e.g. Australian, American, British), and Professional Goal.
-           - DO NOT ask all questions at once. Ask one, wait for answer, then next.
-        3. REAL-TIME UPDATES: Call 'updateUserProfile' IMMEDIATELY whenever you hear a piece of information. Do not wait.
-        4. FLOW:
-           - If the student says "I want to learn English", ask "Excellent. Which accent? British, American, Australian...?"
-           - If the student says "Australian", call updateUserProfile({ accentPreference: 'Australian' }) and say "Australian. A distinguished choice."
-        5. COMPLETION: 
-           - Once you have Name, Language, Accent, and Goal, summarize it briefly.
-           - Ask "Is this profile correct?"
-           - If they say "Yes", call 'finishOnboarding'.
-           - If they say "No", ask what to change, update it, then verify again.
+        1.  Welcome the student concisely.
+        2.  Ask for their NAME.
+        3.  Ask for their NATIVE LANGUAGE.
+        4.  Ask for their TARGET LANGUAGE and specific ACCENT GOAL (e.g. "RP British", "General American", "Parisian French").
+        5.  Ask for their PROFESSIONAL GOAL.
+
+        DATA HANDLING:
+        - Call 'updateUserProfile' IMMEDIATELY when you hear new info. 
+        - DO NOT wait to collect everything before calling the tool. Call it incrementally.
+
+        CONFIRMATION PHASE (CRITICAL):
+        - Once you have Name, Native Language, Target Language, Accent, and Goal:
+        - STOP asking questions.
+        - SAY: "I have recorded the following: [Recite the profile]. Is this correct?"
+        - IF they say YES: Call 'finishOnboarding'. Say "Excellent. I am now generating your curriculum."
+        - IF they say NO: Ask for the correction, update the profile, and confirm again.
         
-        TONE: Prestigious, Academic, Warm, Efficient.`,
+        TONE: Prestigious, Academic, Efficient.`,
         outputAudioTranscription: {},
         inputAudioTranscription: {}
       }

@@ -34,7 +34,9 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const outputContextRef = useRef<AudioContext | null>(null);
+  const goldenSampleContextRef = useRef<AudioContext | null>(null);
   const goldenSampleSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const sessionActive = useRef<boolean>(false);
   const nextStartTimeRef = useRef<number>(0);
@@ -43,14 +45,12 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
   const dataArrayRef = useRef<Uint8Array | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   
-  // Mounted ref to prevent race conditions during async audio setup
   const isMountedRef = useRef(true);
 
-  // Phonetic Deviation Heuristic: Deterministic highlighting for accent simulation
+  // Phonetic Deviation Heuristic
   const highlightedTranscription = useMemo(() => {
     if (!liveTranscription) return null;
     
-    // Trap sounds common in many learner accents
     const difficultSounds = ['th', 'r', 'sh', 'ch', 'ph', 'oo', 'au', 'dh', 'v', 'w', 'rl'];
     
     return liveTranscription.split(' ').map((word, i) => {
@@ -60,10 +60,7 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
       
       let severity = 'none';
       if (hasTrap) {
-        // Deterministic hash based on word content and position to ensure stability (no flickering)
         const hash = cleanWord.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) + i;
-        
-        // Mock analysis: 20% chance of 'red', 30% chance of 'amber' only on trap words
         if (hash % 5 === 0) severity = 'red';
         else if (hash % 3 === 0) severity = 'amber';
       }
@@ -93,6 +90,15 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
     };
   }, [phase, isInterviewerMode]);
 
+  const ensureAudioContextRunning = async () => {
+    if (outputContextRef.current && outputContextRef.current.state === 'suspended') {
+        try { await outputContextRef.current.resume(); } catch(e) {}
+    }
+    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        try { await audioContextRef.current.resume(); } catch(e) {}
+    }
+  };
+
   const startSession = async () => {
     try {
       setStatus('connecting');
@@ -100,7 +106,6 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
       
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // CRITICAL: Check if component unmounted while waiting for permission
       if (!isMountedRef.current) {
         stream.getTracks().forEach(track => track.stop());
         return;
@@ -121,6 +126,8 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
         },
         onmessage: async (message: any) => {
           if (!sessionActive.current || !isMountedRef.current) return;
+          
+          await ensureAudioContextRunning();
 
           const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
           if (audioData && outputContextRef.current && outputContextRef.current.state === 'running') {
@@ -150,7 +157,6 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
 
           if (message.serverContent?.inputTranscription) {
             setLiveTranscription(message.serverContent.inputTranscription.text);
-            // Simulate dynamic stats updates
             setStats(prev => ({
               ...prev,
               confidence: Math.min(1, prev.confidence + 0.005),
@@ -195,8 +201,7 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
       source.connect(processor);
       processor.connect(audioContextRef.current.destination);
 
-      if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
-      if (outputContextRef.current.state === 'suspended') await outputContextRef.current.resume();
+      await ensureAudioContextRunning();
 
       drawWaveform();
       setStatus('listening');
@@ -216,19 +221,14 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
     });
     sourcesRef.current.clear();
     
-    // Stop golden sample if playing
     if (goldenSampleSourceRef.current) {
       try { goldenSampleSourceRef.current.stop(); } catch(e) {}
       goldenSampleSourceRef.current = null;
     }
     
-    const aCtx = audioContextRef.current;
-    const oCtx = outputContextRef.current;
-    audioContextRef.current = null;
-    outputContextRef.current = null;
-    
-    await safeCloseAudioContext(aCtx);
-    await safeCloseAudioContext(oCtx);
+    await safeCloseAudioContext(audioContextRef.current);
+    await safeCloseAudioContext(outputContextRef.current);
+    await safeCloseAudioContext(goldenSampleContextRef.current);
     
     if (sessionPromiseRef.current) {
       try {
@@ -267,6 +267,7 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
   };
 
   const handleGoldenSample = async () => {
+    // If playing, stop it
     if (isPlayingGoldenSample) {
       if (goldenSampleSourceRef.current) {
         try { goldenSampleSourceRef.current.stop(); } catch(e) {}
@@ -276,21 +277,26 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
       return;
     }
 
-    if (!liveTranscription || isGeneratingGoldenSample || !outputContextRef.current) return;
+    if (!liveTranscription || isGeneratingGoldenSample) return;
     
     setIsGeneratingGoldenSample(true);
     try {
       const base64Audio = await geminiService.generateGoldenSample(liveTranscription, lessonConfig.accentPreference);
       if (base64Audio) {
-        // Ensure context is still valid before decoding/playing
-        if (!outputContextRef.current || outputContextRef.current.state === 'closed') return;
+        // Use a dedicated context for Golden Sample to avoid conflict with live stream
+        if (!goldenSampleContextRef.current || goldenSampleContextRef.current.state === 'closed') {
+             goldenSampleContextRef.current = new AudioContext({ sampleRate: 24000 });
+        }
+        if (goldenSampleContextRef.current.state === 'suspended') {
+            await goldenSampleContextRef.current.resume();
+        }
 
         setIsPlayingGoldenSample(true);
-        const audioBuffer = await decodeAudioData(decode(base64Audio), outputContextRef.current, 24000, 1);
+        const audioBuffer = await decodeAudioData(decode(base64Audio), goldenSampleContextRef.current, 24000, 1);
         
-        const source = outputContextRef.current.createBufferSource();
+        const source = goldenSampleContextRef.current.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(outputContextRef.current.destination);
+        source.connect(goldenSampleContextRef.current.destination);
         
         goldenSampleSourceRef.current = source;
         source.start();
@@ -383,7 +389,6 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
               )}
             </div>
 
-            {/* Golden Sample Button - Only shows when there is transcription */}
             {liveTranscription && (
               <button 
                 onClick={handleGoldenSample}
@@ -406,7 +411,7 @@ export const ScenarioSimulator: React.FC<ScenarioSimulatorProps> = ({ lessonConf
                  onClick={async () => { await stopSession(); onLessonComplete(); }} 
                  className="flex-1 bg-academic-red text-white py-6 md:py-12 rounded-2xl md:rounded-full font-black uppercase tracking-[0.4em] md:tracking-[0.8em] text-[10px] md:text-[11px] shadow-5xl animate-subtle hover:scale-105 md:hover:scale-110 transition-all active:scale-95"
                >
-                  Complete Assessment & Exit →
+                  Complete Assessment & Take Quiz →
                </button>
             ) : phase === 'evaluation' ? (
               <button 

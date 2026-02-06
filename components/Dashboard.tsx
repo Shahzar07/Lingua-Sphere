@@ -1,220 +1,257 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { GlassCard } from './GlassCard';
 import { Icons } from '../constants';
 import { ScenarioSimulator } from './ScenarioSimulator';
-import { Onboarding } from './Onboarding';
 import { QuizInterface } from './QuizInterface';
-import { GlassCard } from './GlassCard';
 import { geminiService } from '../services/geminiService';
-import { UserProfile, DayPlan, Quiz } from '../types';
+import { DayPlan, UserProfile, Quiz } from '../types';
 
-type View = 'onboarding' | 'dashboard' | 'session' | 'quiz';
+interface DashboardProps {
+  onLogout: () => void;
+  userProfile: UserProfile | null;
+}
 
-export const Dashboard: React.FC = () => {
-  const [activeView, setActiveView] = useState<View>('onboarding');
-  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-  const [curriculum, setCurriculum] = useState<DayPlan[]>([]);
-  const [currentDay, setCurrentDay] = useState<DayPlan | null>(null);
-  const [activeQuiz, setActiveQuiz] = useState<Quiz | null>(null);
+export const Dashboard: React.FC<DashboardProps> = ({ onLogout, userProfile }) => {
+  const [activeMode, setActiveMode] = useState<'overview' | 'simulation' | 'quiz'>('overview');
   const [loading, setLoading] = useState(false);
-  const [expandedDay, setExpandedDay] = useState<number | null>(null);
+  const [days, setDays] = useState<DayPlan[]>([]);
+  const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [activeQuiz, setActiveQuiz] = useState<Quiz | null>(null);
+  const [loadingQuiz, setLoadingQuiz] = useState(false);
 
-  const handleOnboardingComplete = async (profile: UserProfile, preGeneratedPlan: DayPlan[]) => {
-    setUserProfile(profile);
-    if (preGeneratedPlan && preGeneratedPlan.length > 0) {
-      setCurriculum(preGeneratedPlan);
-      setActiveView('dashboard');
-    } else {
+  useEffect(() => {
+    const init = async () => {
       setLoading(true);
+      
+      const profileToUse = userProfile || {
+        name: "Guest Student",
+        nativeLanguage: "English",
+        targetLanguage: "Spanish",
+        proficiency: "beginner" as const,
+        accentPreference: "Neutral",
+        professionalGoal: "General Fluency"
+      };
+
       try {
-        const plan = await geminiService.generateStudentPlan(profile);
-        setCurriculum(plan);
-        setActiveView('dashboard');
+          // REMOVED artificial delay for speed
+          const plans = await geminiService.generateStudentPlan(profileToUse);
+          setDays(plans);
       } catch (e) {
-        console.error("Dashboard Plan Generation Error:", e);
+          console.error("Plan generation failed", e);
       } finally {
-        setLoading(false);
+          setLoading(false);
       }
-    }
+    };
+    init();
+  }, [userProfile]);
+
+  const handleStartSimulation = () => {
+      setActiveMode('simulation');
   };
 
-  const startDaySession = (day: DayPlan) => {
-    if (day.status === 'locked') return;
-    setCurrentDay(day);
-    setActiveView('session');
-  };
-
-  const handleLessonComplete = async () => {
-    if (!currentDay || !userProfile) return;
-    setLoading(true);
-    try {
-      const quiz = await geminiService.generateDailyQuiz(currentDay, userProfile.targetLanguage);
-      setActiveQuiz(quiz);
-      setActiveView('quiz');
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
+  const handleSimulationComplete = async () => {
+      setLoadingQuiz(true);
+      setActiveMode('quiz');
+      try {
+        const day = days[selectedDayIndex];
+        const quiz = await geminiService.generateDailyQuiz(day, userProfile?.targetLanguage || "English");
+        setActiveQuiz(quiz);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoadingQuiz(false);
+      }
   };
 
   const handleQuizComplete = (score: number) => {
-    const updatedCurriculum = curriculum.map(day => {
-      if (day.day === currentDay?.day) {
-        return { ...day, status: 'completed' as const, score };
+      const newDays = [...days];
+      newDays[selectedDayIndex].status = 'completed';
+      if (newDays[selectedDayIndex + 1]) {
+          newDays[selectedDayIndex + 1].status = 'active';
       }
-      if (day.day === (currentDay?.day || 0) + 1) {
-        return { ...day, status: 'active' as const };
-      }
-      return day;
-    });
-    setCurriculum(updatedCurriculum);
-    setActiveView('dashboard');
+      setDays(newDays);
+      setActiveMode('overview');
   };
 
-  if (activeView === 'onboarding') {
-    return <Onboarding onComplete={handleOnboardingComplete} isLoading={loading} />;
+  if (activeMode === 'simulation' && days[selectedDayIndex]) {
+    return (
+      <div className="min-h-screen bg-slate-50 pt-20">
+        <div className="fixed top-0 w-full z-50 px-6 py-4 flex justify-between items-center bg-white/80 backdrop-blur-md border-b border-slate-200">
+           <button onClick={() => setActiveMode('overview')} className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-academic-red transition-colors">
+             ← Return to Curriculum
+           </button>
+           <span className="text-sm font-serif font-bold text-slate-900">Day {days[selectedDayIndex].day}: {days[selectedDayIndex].topic}</span>
+        </div>
+        <ScenarioSimulator 
+          lessonConfig={{
+            topic: days[selectedDayIndex].topic,
+            accentPreference: userProfile?.accentPreference || "Neutral",
+            phase: 'instruction',
+            dayContext: days[selectedDayIndex],
+            userProfile: userProfile || undefined
+          }}
+          onLessonComplete={handleSimulationComplete}
+        />
+      </div>
+    );
+  }
+
+  if (activeMode === 'quiz') {
+      return (
+        <div className="min-h-screen bg-slate-50 pt-20 flex items-center justify-center">
+            {loadingQuiz ? (
+                 <div className="text-center space-y-4">
+                     <div className="w-12 h-12 border-4 border-slate-200 border-t-academic-red rounded-full animate-spin mx-auto" />
+                     <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Generating Assessment...</p>
+                 </div>
+            ) : activeQuiz ? (
+                <QuizInterface quiz={activeQuiz} onComplete={handleQuizComplete} />
+            ) : (
+                <div className="text-center">Failed to load quiz. <button onClick={() => setActiveMode('overview')}>Back</button></div>
+            )}
+        </div>
+      );
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-white">
-      <header className="sticky top-0 z-50 px-6 py-6 md:px-16 md:py-12 flex flex-col md:flex-row justify-between items-center bg-white/95 backdrop-blur-xl border-b border-slate-50 gap-6 md:gap-0">
-        <div className="flex items-center gap-4 md:gap-10">
-          <div className="w-12 h-12 md:w-16 md:h-16 bg-academic-red rounded-xl md:rounded-2xl flex items-center justify-center font-serif font-bold text-2xl md:text-4xl text-white shadow-3xl shadow-red-900/20">L</div>
+    <div className="min-h-screen bg-slate-50 pb-20 font-sans">
+      {/* Dashboard Nav */}
+      <nav className="fixed top-0 w-full z-50 px-6 py-4 bg-white/80 backdrop-blur-xl border-b border-slate-200 flex justify-between items-center">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-academic-red text-white flex items-center justify-center rounded font-serif font-bold">L</div>
+          <span className="font-serif font-bold text-lg text-slate-900">LinguaSphere</span>
+        </div>
+        <div className="flex items-center gap-6">
+            <span className="hidden md:block text-xs font-bold uppercase tracking-widest text-slate-400">
+                Student: {userProfile?.name || "Guest"}
+            </span>
+            <button onClick={onLogout} className="text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-red-900">Sign Out</button>
+        </div>
+      </nav>
+
+      <div className="max-w-7xl mx-auto px-6 pt-32 animate-in fade-in duration-700">
+        <div className="flex flex-col md:flex-row justify-between items-end mb-12 gap-6">
           <div>
-            <h1 className="text-3xl md:text-5xl font-serif font-bold tracking-tighter text-slate-900 leading-none">LinguaSphere</h1>
-            <p className="text-[8px] md:text-[12px] font-black uppercase tracking-[0.5em] md:tracking-[0.7em] text-academic-red mt-2 md:mt-3">Academy of Linguistic Sciences</p>
+            <span className="text-academic-red font-bold uppercase tracking-widest text-xs mb-2 block">15-Day Residency</span>
+            <h1 className="text-4xl md:text-5xl font-serif font-medium text-slate-900">Your Curriculum</h1>
+          </div>
+          <div className="bg-white border border-slate-200 px-6 py-3 rounded-full flex items-center gap-4 shadow-sm">
+             <div className="flex flex-col">
+               <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Target</span>
+               <span className="font-serif font-bold text-slate-900">{userProfile?.targetLanguage} ({userProfile?.accentPreference})</span>
+             </div>
+             <div className="h-8 w-px bg-slate-200" />
+             <div className="flex flex-col text-right">
+                <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Progress</span>
+                <span className="font-serif font-bold text-academic-red">Day {days.findIndex(d => d.status === 'active') + 1}/15</span>
+             </div>
           </div>
         </div>
-        
-        {userProfile && (
-          <div className="flex items-center gap-6 md:gap-16 w-full md:w-auto justify-end">
-            <div className="text-right hidden md:block">
-              <span className="text-[12px] font-black uppercase tracking-widest text-slate-300 block mb-1">Scholar in Residence</span>
-              <span className="text-xl font-bold text-slate-900">{userProfile.name} • <span className="text-academic-red italic">{userProfile.accentPreference} Specialist</span></span>
+
+        {loading ? (
+          <div className="min-h-[50vh] flex flex-col items-center justify-center space-y-8">
+            <div className="relative">
+                <div className="w-24 h-24 border-4 border-slate-100 rounded-full" />
+                <div className="absolute inset-0 border-4 border-t-academic-red border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin" />
+                <div className="absolute inset-4 bg-slate-50 rounded-full flex items-center justify-center">
+                    <span className="font-serif font-bold text-2xl text-slate-300 animate-pulse">AI</span>
+                </div>
             </div>
-            <div className="w-12 h-12 md:w-20 md:h-20 rounded-full bg-slate-50 border border-slate-100 flex items-center justify-center text-academic-red font-serif font-bold text-xl md:text-3xl shadow-xl">
-               {userProfile.name.charAt(0)}
+            <div className="text-center space-y-2">
+                <p className="text-slate-900 text-sm uppercase tracking-[0.2em] font-bold animate-pulse">Dean is Architecting Plan...</p>
+                <p className="text-slate-400 text-xs max-w-md mx-auto leading-relaxed">
+                    Analyzing {userProfile?.nativeLanguage} phonemes to map against {userProfile?.targetLanguage} syntax. 
+                    Constructing {userProfile?.planDuration} unique modules based on {userProfile?.professionalGoal}.
+                </p>
             </div>
           </div>
-        )}
-      </header>
-
-      <main className="flex-1 container mx-auto px-6 md:px-16 py-12 md:py-32">
-        {activeView === 'dashboard' && (
-           <div className="max-w-[1500px] mx-auto space-y-20 md:space-y-40 animate-in fade-in duration-1000">
-             <div className="space-y-6 md:space-y-10 max-w-5xl">
-               <h2 className="text-6xl md:text-[10rem] font-serif text-slate-900 tracking-tighter leading-tight md:leading-[0.85]">The <span className="text-academic-red italic">Mastery</span> Path</h2>
-               <p className="text-slate-400 text-xl md:text-4xl font-light leading-relaxed max-w-4xl">
-                 A 15-day clinical intensive path designed for absolute fluency and accent grip in <span className="text-slate-900 font-medium underline decoration-academic-red/20 underline-offset-12">{userProfile?.targetLanguage}</span>.
-               </p>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+             {/* Left Column: Timeline */}
+             <div className="lg:col-span-2 space-y-6">
+               {days.map((day, i) => (
+                 <GlassCard 
+                   key={i} 
+                   onClick={() => day.status !== 'locked' && setSelectedDayIndex(i)}
+                   className={`relative border transition-all duration-300 ${i === selectedDayIndex ? 'bg-white border-academic-red ring-1 ring-academic-red/20 shadow-xl scale-[1.02]' : 'bg-white/50 border-slate-100 hover:border-slate-300 hover:bg-white'} ${day.status === 'locked' ? 'opacity-50 cursor-not-allowed grayscale' : 'cursor-pointer'}`}
+                 >
+                    <div className="flex items-start gap-6">
+                       <div className={`flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center font-serif font-bold text-lg border ${day.status === 'completed' ? 'bg-green-100 text-green-700 border-green-200' : i === selectedDayIndex ? 'bg-academic-red text-white border-academic-red' : 'bg-slate-50 text-slate-400 border-slate-200'}`}>
+                          {day.status === 'completed' ? <Icons.Check /> : day.day}
+                       </div>
+                       <div className="flex-1">
+                          <div className="flex justify-between items-start mb-2">
+                             <h3 className={`font-serif font-bold text-xl ${i === selectedDayIndex ? 'text-slate-900' : 'text-slate-500'}`}>{day.title}</h3>
+                             {day.status === 'active' && <span className="px-3 py-1 bg-academic-red text-white text-[10px] font-bold uppercase tracking-widest rounded-full">Current Focus</span>}
+                             {day.status === 'completed' && <span className="px-3 py-1 bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-widest rounded-full">Completed</span>}
+                             {day.status === 'locked' && <Icons.Zap />} 
+                          </div>
+                          <p className="text-slate-500 text-sm mb-4 leading-relaxed">{day.objective}</p>
+                          
+                          {i === selectedDayIndex && (
+                            <div className="grid grid-cols-3 gap-4 pt-4 border-t border-slate-100">
+                               {Object.entries(day.phases).map(([key, val]) => (
+                                 <div key={key}>
+                                    <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400 block mb-1">{key}</span>
+                                    <p className="text-xs text-slate-700 line-clamp-2">{val}</p>
+                                 </div>
+                               ))}
+                            </div>
+                          )}
+                       </div>
+                    </div>
+                 </GlassCard>
+               ))}
              </div>
 
-             <div className="grid gap-6 md:gap-10 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
-               {curriculum.map((day) => {
-                 const isExpanded = expandedDay === day.day;
-                 return (
-                   <GlassCard 
-                      key={day.day}
-                      onClick={() => day.status !== 'locked' && setExpandedDay(isExpanded ? null : day.day)}
-                      className={`relative overflow-hidden group border-none transition-all duration-700 p-8 md:p-16 ring-1 ${
-                        day.status === 'completed' ? 'bg-slate-50/50 opacity-60 ring-slate-100' : 
-                        day.status === 'active' ? 'bg-white ring-slate-200 premium-shadow z-10' : 
-                        'bg-white ring-slate-100 opacity-20 grayscale pointer-events-none'
-                      } ${isExpanded ? 'lg:col-span-2' : ''}`}
-                    >
-                      <div className="space-y-8 md:space-y-12">
-                        <div className="flex justify-between items-start">
-                           <span className={`text-[10px] md:text-[12px] font-black uppercase tracking-[0.4em] md:tracking-[0.6em] px-4 py-2 md:px-6 md:py-3 rounded-full border ${day.status === 'active' ? 'bg-slate-900 text-white border-slate-900 shadow-xl' : 'bg-transparent text-slate-300 border-slate-200'}`}>Day {day.day < 10 ? `0${day.day}` : day.day}</span>
-                           {day.status === 'completed' && <div className="text-academic-red"><Icons.Award /></div>}
-                        </div>
-                        
-                        <div>
-                          <h3 className={`${isExpanded ? 'text-4xl md:text-7xl' : 'text-3xl md:text-5xl'} font-serif font-bold text-slate-900 mb-4 md:mb-8 tracking-tight transition-all duration-700`}>{day.title}</h3>
-                          <p className="text-lg md:text-xl text-slate-500 font-medium leading-relaxed italic opacity-80">{day.objective}</p>
-                        </div>
-
-                        {isExpanded && (
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 py-10 border-t border-slate-100 animate-in fade-in slide-in-from-bottom-4 duration-700">
-                             <div className="space-y-4">
-                               <div className="flex items-center gap-4 text-academic-red">
-                                 <Icons.Brain />
-                                 <span className="text-[10px] font-black uppercase tracking-widest">I. Instruction</span>
-                               </div>
-                               <p className="text-sm text-slate-500 leading-relaxed">{day.phases.instruction}</p>
-                             </div>
-                             <div className="space-y-4">
-                               <div className="flex items-center gap-4 text-slate-900">
-                                 <Icons.Microphone />
-                                 <span className="text-[10px] font-black uppercase tracking-widest">II. Practice</span>
-                               </div>
-                               <p className="text-sm text-slate-500 leading-relaxed">{day.phases.practice}</p>
-                             </div>
-                             <div className="space-y-4">
-                               <div className="flex items-center gap-4 text-emerald-600">
-                                 <Icons.Target />
-                                 <span className="text-[10px] font-black uppercase tracking-widest">III. Evaluation</span>
-                               </div>
-                               <p className="text-sm text-slate-500 leading-relaxed">{day.phases.evaluation}</p>
-                             </div>
+             {/* Right Column: Action Panel */}
+             <div className="lg:col-span-1">
+                <div className="sticky top-32 space-y-6">
+                   <GlassCard className="bg-slate-900 text-white p-8 border-none shadow-2xl relative overflow-hidden">
+                      <div className="absolute top-0 right-0 w-32 h-32 bg-academic-red rounded-full blur-[60px] opacity-20" />
+                      <h3 className="text-2xl font-serif font-bold mb-2">Ready to Begin?</h3>
+                      <p className="text-slate-400 text-sm mb-8 leading-relaxed">
+                        Day {days[selectedDayIndex]?.day} focuses on {days[selectedDayIndex]?.topic}. 
+                        Ensure you are in a quiet environment for accurate voice analysis.
+                      </p>
+                      
+                      {days[selectedDayIndex]?.status === 'completed' ? (
+                          <div className="w-full py-4 bg-green-600 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2">
+                              <Icons.Check /> Module Complete
                           </div>
-                        )}
-
-                        <div className="flex gap-3">
-                          {[1,2,3].map(i => <div key={i} className={`h-1.5 flex-1 rounded-full ${day.status === 'completed' ? 'bg-academic-red' : 'bg-slate-100'}`} />)}
-                        </div>
-
-                        {day.status === 'active' && (
-                          <div className="pt-8 md:pt-10 border-t border-slate-50 flex justify-between items-center">
-                             {isExpanded ? (
-                               <button 
-                                 onClick={(e) => { e.stopPropagation(); startDaySession(day); }}
-                                 className="w-full bg-slate-900 text-white py-6 md:py-8 rounded-2xl font-black uppercase tracking-[0.4em] md:tracking-[0.8em] text-[10px] shadow-2xl hover:bg-academic-red transition-all transform hover:scale-[1.02]"
-                               >
-                                 Commence Master Session →
-                               </button>
-                             ) : (
-                               <span className="text-[10px] md:text-[12px] font-black uppercase tracking-[0.5em] md:tracking-[0.7em] text-academic-red animate-pulse">Inspect Curriculum →</span>
-                             )}
-                          </div>
-                        )}
-                      </div>
+                      ) : (
+                        <button 
+                            onClick={handleStartSimulation}
+                            className="w-full bg-white text-slate-900 py-4 rounded-xl font-black uppercase tracking-widest text-xs hover:bg-academic-red hover:text-white transition-all shadow-lg active:scale-95 flex items-center justify-center gap-3"
+                        >
+                            Enter Simulation <Icons.ArrowRight />
+                        </button>
+                      )}
                    </GlassCard>
-                 );
-               })}
-             </div>
-           </div>
-        )}
 
-        {activeView === 'session' && currentDay && userProfile && (
-          <div className="animate-in slide-in-from-right duration-700">
-             <button 
-               onClick={() => setActiveView('dashboard')}
-               className="mb-12 md:mb-24 text-[10px] md:text-[12px] font-black text-slate-400 hover:text-academic-red uppercase tracking-[0.6em] md:tracking-[0.8em] flex items-center gap-6 md:gap-10 transition-all"
-             >
-               <span className="text-3xl md:text-4xl leading-none">←</span> Exit Conservatory Campus
-             </button>
-             <ScenarioSimulator 
-               lessonConfig={{
-                 language: userProfile.targetLanguage,
-                 nativeLanguage: userProfile.nativeLanguage,
-                 accentPreference: userProfile.accentPreference,
-                 phase: 'instruction',
-                 topic: currentDay.topic,
-                 proficiency: userProfile.proficiency,
-                 dayContext: currentDay
-               }}
-               onLessonComplete={handleLessonComplete}
-             />
+                   <div className="bg-white border border-slate-200 rounded-2xl p-6">
+                      <h4 className="font-serif font-bold text-slate-900 mb-4">Live Metrics</h4>
+                      <div className="space-y-4">
+                         <div>
+                            <div className="flex justify-between text-xs mb-1">
+                               <span className="text-slate-500 font-bold uppercase">Fluency</span>
+                               <span className="text-slate-900 font-bold">--</span>
+                            </div>
+                            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                               <div className="h-full w-[0%] bg-emerald-500" />
+                            </div>
+                         </div>
+                         <p className="text-[10px] text-slate-400 italic mt-2">
+                             Complete daily simulations to unlock detailed analytics.
+                         </p>
+                      </div>
+                   </div>
+                </div>
+             </div>
           </div>
         )}
-
-        {activeView === 'quiz' && activeQuiz && (
-           <div className="animate-in zoom-in duration-700">
-              <QuizInterface quiz={activeQuiz} onComplete={handleQuizComplete} />
-           </div>
-        )}
-      </main>
+      </div>
     </div>
   );
 };
